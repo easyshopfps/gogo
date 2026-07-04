@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ระบบสุริยะ - ควบคุมด้วยมือ</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:'Segoe UI',Tahoma,sans-serif;color:#fff;}
+  #canvas3d{position:fixed;top:0;left:0;width:100%;height:100%;display:block;}
+  #video{position:fixed;bottom:16px;right:16px;width:180px;height:135px;border-radius:12px;
+    border:2px solid rgba(120,180,255,.5);opacity:.85;transform:scaleX(-1);z-index:5;
+    box-shadow:0 0 20px rgba(80,140,255,.4);}
+  #overlay{position:fixed;bottom:16px;right:16px;width:180px;height:135px;transform:scaleX(-1);z-index:6;pointer-events:none;}
+  #hud{position:fixed;top:16px;left:16px;z-index:6;background:rgba(10,15,30,.55);
+    padding:14px 18px;border-radius:14px;border:1px solid rgba(120,170,255,.3);
+    backdrop-filter:blur(6px);max-width:300px;font-size:13px;line-height:1.6;}
+  #hud h1{font-size:16px;margin:0 0 8px;background:linear-gradient(90deg,#8ecfff,#ffd27a);
+    -webkit-background-clip:text;background-clip:text;color:transparent;}
+  #hud .row{opacity:.85}
+  #gesture{position:fixed;top:16px;right:16px;z-index:6;background:rgba(10,15,30,.55);
+    padding:10px 18px;border-radius:14px;border:1px solid rgba(120,170,255,.3);
+    font-size:14px;backdrop-filter:blur(6px);}
+  #status{color:#7ee787;font-weight:600;}
+  #startBtn{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;
+    padding:16px 34px;font-size:16px;border-radius:40px;border:1px solid rgba(140,190,255,.5);
+    background:linear-gradient(135deg,#1c2a4a,#0e1730);color:#dce8ff;cursor:pointer;
+    box-shadow:0 0 30px rgba(80,140,255,.35);letter-spacing:.5px;}
+  #startBtn:hover{background:linear-gradient(135deg,#26365e,#152040);}
+  #label{position:fixed;left:0;right:0;bottom:24px;text-align:center;z-index:6;
+    font-size:12px;color:#9fb4d8;opacity:.7;}
+</style>
+</head>
+<body>
+
+<canvas id="canvas3d"></canvas>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="overlay"></canvas>
+
+<div id="hud">
+  <h1>☀️ ระบบสุริยะแบบโต้ตอบ</h1>
+  <div class="row">✊ กำมือ → ดวงอาทิตย์กลืนกินดาวเคราะห์</div>
+  <div class="row">✋ แบมือ → ดาวเคราะห์กลับสู่วงโคจร</div>
+  <div class="row">🤟 สัญลักษณ์ I Love You → ดาวรวมกันเป็นรูปหัวใจ</div>
+  <div class="row">👋 ดันมือเข้าจอ → ซูมเข้า</div>
+  <div class="row">👋💨 ดึงมือกลับเร็ว ๆ → ซูมออกสะบัด + ดาวหมุนวน</div>
+</div>
+
+<div id="gesture">มือ: <span id="status">ไม่พบมือ</span></div>
+<div id="label">เปิดกล้องแล้วยกมือให้เห็นในเฟรมกล้อง</div>
+<button id="startBtn">เปิดกล้อง &amp; เริ่มต้น</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/* ============================= THREE.JS SCENE ============================= */
+const canvas = document.getElementById('canvas3d');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 5000);
+let cameraDefaultDist = 220, cameraDist = 220;
+camera.position.set(0, 90, cameraDist);
+camera.lookAt(0,0,0);
+
+// Starfield
+function makeStars(count, spread, size){
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    const r = spread*(0.5+Math.random()*0.5);
+    const theta = Math.random()*Math.PI*2;
+    const phi = Math.acos(2*Math.random()-1);
+    pos[i*3] = r*Math.sin(phi)*Math.cos(theta);
+    pos[i*3+1] = r*Math.sin(phi)*Math.sin(theta);
+    pos[i*3+2] = r*Math.cos(phi);
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const mat = new THREE.PointsMaterial({color:0xffffff, size:size, transparent:true, opacity:0.85, depthWrite:false});
+  return new THREE.Points(geo, mat);
+}
+const stars = makeStars(6000, 2200, 1.4);
+scene.add(stars);
+const starsClose = makeStars(1500, 900, 2.2);
+scene.add(starsClose);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x334466, 0.4));
+const sunLight = new THREE.PointLight(0xfff2cc, 3.2, 3000, 1.6);
+scene.add(sunLight);
+
+// Sun
+const sunBaseRadius = 14;
+const sunGeo = new THREE.SphereGeometry(sunBaseRadius, 48, 48);
+const sunMat = new THREE.MeshBasicMaterial({color:0xffcc55});
+const sun = new THREE.Mesh(sunGeo, sunMat);
+scene.add(sun);
+const sunGlowGeo = new THREE.SphereGeometry(sunBaseRadius*1.35, 48, 48);
+const sunGlowMat = new THREE.MeshBasicMaterial({color:0xffaa33, transparent:true, opacity:0.35});
+const sunGlow = new THREE.Mesh(sunGlowGeo, sunGlowMat);
+scene.add(sunGlow);
+
+// Orbit lines
+function makeOrbitLine(radius){
+  const pts = [];
+  for(let i=0;i<=128;i++){
+    const a = (i/128)*Math.PI*2;
+    pts.push(new THREE.Vector3(Math.cos(a)*radius, 0, Math.sin(a)*radius));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const mat = new THREE.LineBasicMaterial({color:0x557799, transparent:true, opacity:0.35});
+  return new THREE.Line(geo, mat);
+}
+
+// Planet data: name, radius, orbitRadius, orbitSpeed, color, tilt, ring?
+const planetDefs = [
+  {name:'Mercury', r:1.6, orbit:26,  speed:1.60, color:0xa79a8c},
+  {name:'Venus',   r:2.8, orbit:37,  speed:1.18, color:0xe0b98d},
+  {name:'Earth',   r:3.0, orbit:50,  speed:1.00, color:0x4d90fe, moon:true},
+  {name:'Mars',    r:2.2, orbit:64,  speed:0.80, color:0xc1440e},
+  {name:'Jupiter', r:8.5, orbit:92,  speed:0.44, color:0xd8ae7e},
+  {name:'Saturn',  r:7.2, orbit:122, speed:0.33, color:0xe3cf9c, ring:true},
+  {name:'Uranus',  r:5.0, orbit:150, speed:0.24, color:0x9fdde0},
+  {name:'Neptune', r:4.8, orbit:175, speed:0.19, color:0x4166f5},
+];
+
+const planets = [];
+planetDefs.forEach((def, idx)=>{
+  scene.add(makeOrbitLine(def.orbit));
+  const geo = new THREE.SphereGeometry(def.r, 32, 32);
+  const mat = new THREE.MeshStandardMaterial({color:def.color, roughness:0.8, metalness:0.1});
+  const mesh = new THREE.Mesh(geo, mat);
+  const angle = Math.random()*Math.PI*2;
+  mesh.userData = {
+    def, angle, baseScale:1,
+    heartIndex: idx
+  };
+  scene.add(mesh);
+  if(def.ring){
+    const ringGeo = new THREE.RingGeometry(def.r*1.4, def.r*2.3, 64);
+    const ringMat = new THREE.MeshBasicMaterial({color:0xcbb98a, side:THREE.DoubleSide, transparent:true, opacity:0.7});
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = Math.PI/2 - 0.4;
+    mesh.add(ring);
+  }
+  if(def.moon){
+    const moonGeo = new THREE.SphereGeometry(0.8, 16, 16);
+    const moonMat = new THREE.MeshStandardMaterial({color:0xaaaaaa});
+    const moon = new THREE.Mesh(moonGeo, moonMat);
+    moon.userData.moonAngle = 0;
+    moon.userData.moonDist = def.r*3;
+    mesh.add(moon);
+    mesh.userData.moon = moon;
+  }
+  planets.push(mesh);
+});
+
+// Heart-shape target positions (parametric heart curve), scaled & spread across planets
+function heartPoint(t, scale){
+  // classic heart parametric equation
+  const x = 16*Math.pow(Math.sin(t),3);
+  const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+  return new THREE.Vector3(x*scale, y*scale, 0);
+}
+
+/* ============================= INTERACTION STATE ============================= */
+let suckT = 0;        // 0 = normal orbit, 1 = fully sucked into sun
+let heartT = 0;       // 0 = normal orbit, 1 = fully formed heart
+let sunScaleTarget = 1;
+let flingAnim = 0;    // 0..1 progress of fling burst animation
+let flingActive = false;
+let swirlSpeed = 0;
+
+let handSizeSmoothed = null;
+let lastHandSize = null;
+let lastHandTime = performance.now();
+let zoomTargetDist = cameraDefaultDist;
+
+const statusEl = document.getElementById('status');
+
+/* ============================= RENDER LOOP ============================= */
+const clock = new THREE.Clock();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  // ease state transitions
+  const suckSpeed = 2.2;
+  const heartSpeed = 2.6;
+
+  // sun scale & light follow suck amount
+  const sunScale = 1 + suckT*2.6;
+  sun.scale.setScalar(sunScale);
+  sunGlow.scale.setScalar(sunScale*1.05 + Math.sin(t*3)*0.02);
+  sunLight.intensity = 3.2 + suckT*4.5;
+
+  planets.forEach((mesh)=>{
+    const def = mesh.userData.def;
+    mesh.userData.angle += def.speed*0.28*dt*(1-suckT*0.6) + swirlSpeed*dt;
+
+    // base orbit position
+    const orbitPos = new THREE.Vector3(
+      Math.cos(mesh.userData.angle)*def.orbit,
+      Math.sin(t*0.5+mesh.userData.angle)*1.2,
+      Math.sin(mesh.userData.angle)*def.orbit
+    );
+
+    // sucked-into-sun position: lerp toward origin, shrink
+    const suckPos = orbitPos.clone().lerp(new THREE.Vector3(0,0,0), suckT);
+    const suckScale = 1 - suckT*0.85;
+
+    // heart formation position
+    const heartIdx = mesh.userData.heartIndex;
+    const heartAngle = (heartIdx/planets.length)*Math.PI*2 + t*0.15;
+    const hp = heartPoint(heartAngle, 3.0);
+    hp.z = Math.sin(t*0.6+heartIdx)*6;
+
+    // blend: orbit -> suck -> heart (heart takes priority if active)
+    const basePos = suckPos;
+    const finalPos = basePos.clone().lerp(hp, heartT);
+    mesh.position.copy(finalPos);
+
+    const finalScale = suckScale*(1-heartT) + heartT*1.0;
+    mesh.scale.setScalar(Math.max(finalScale,0.02));
+
+    mesh.rotation.y += dt*0.6;
+
+    if(mesh.userData.moon){
+      mesh.userData.moon.userData.moonAngle += dt*2.2;
+      const ma = mesh.userData.moon.userData.moonAngle;
+      mesh.userData.moon.position.set(Math.cos(ma)*mesh.userData.moon.userData.moonDist,0,Math.sin(ma)*mesh.userData.moon.userData.moonDist);
+    }
+  });
+
+  // camera zoom handling + fling burst
+  if(flingActive){
+    flingAnim += dt*1.6;
+    const burst = Math.sin(Math.min(flingAnim,1)*Math.PI); // 0->1->0
+    cameraDist = cameraDefaultDist + burst*260;
+    swirlSpeed = burst*3.5;
+    if(flingAnim >= 1){
+      flingActive = false;
+      flingAnim = 0;
+      swirlSpeed = 0;
+      zoomTargetDist = cameraDefaultDist;
+    }
+  } else {
+    cameraDist += (zoomTargetDist - cameraDist)*Math.min(dt*4,1);
+    swirlSpeed += (0-swirlSpeed)*Math.min(dt*3,1);
+  }
+
+  const camAngle = t*0.03;
+  camera.position.set(Math.sin(camAngle)*cameraDist*0.15, 90*(cameraDist/cameraDefaultDist), cameraDist);
+  camera.lookAt(0,0,0);
+
+  stars.rotation.y += dt*0.005;
+  starsClose.rotation.y -= dt*0.008;
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ============================= HAND TRACKING ============================= */
+const videoEl = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+
+function dist(a,b){
+  return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
+}
+
+function isExtended(landmarks, tipIdx, pipIdx, mcpIdx){
+  const wrist = landmarks[0];
+  const tip = landmarks[tipIdx];
+  const pip = landmarks[pipIdx];
+  const mcp = landmarks[mcpIdx];
+  return dist(tip,wrist) > dist(pip,wrist)*1.05 && dist(tip,wrist) > dist(mcp,wrist)*1.1;
+}
+
+function classifyGesture(landmarks){
+  const thumbExt = dist(landmarks[4], landmarks[17]) > dist(landmarks[2], landmarks[17])*0.9;
+  const indexExt = isExtended(landmarks, 8, 6, 5);
+  const middleExt = isExtended(landmarks, 12, 10, 9);
+  const ringExt = isExtended(landmarks, 16, 14, 13);
+  const pinkyExt = isExtended(landmarks, 20, 18, 17);
+
+  const extCount = [indexExt,middleExt,ringExt,pinkyExt].filter(Boolean).length;
+
+  if(!indexExt && !middleExt && !ringExt && !pinkyExt){
+    return 'fist';
+  }
+  if(indexExt && pinkyExt && !middleExt && !ringExt){
+    return 'ily';
+  }
+  if(extCount >= 3){
+    return 'open';
+  }
+  return 'none';
+}
+
+function handBoundingSize(landmarks){
+  let minX=1,maxX=0,minY=1,maxY=0;
+  landmarks.forEach(p=>{
+    if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+    if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+  });
+  return Math.hypot(maxX-minX, maxY-minY);
+}
+
+let gestureHoldStart = {fist:0, ily:0};
+let currentGesture = 'none';
+
+function onResults(results){
+  octx.save();
+  octx.clearRect(0,0,overlay.width, overlay.height);
+
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
+    const landmarks = results.multiHandLandmarks[0];
+
+    // draw simple skeleton dots
+    octx.fillStyle = 'rgba(140,200,255,0.9)';
+    landmarks.forEach(p=>{
+      octx.beginPath();
+      octx.arc(p.x*overlay.width, p.y*overlay.height, 3, 0, Math.PI*2);
+      octx.fill();
+    });
+
+    const gesture = classifyGesture(landmarks);
+    currentGesture = gesture;
+
+    const gestureLabel = {fist:'✊ กำมือ', ily:'🤟 I Love You', open:'✋ แบมือ', none:'กำลังตรวจจับ...'};
+    statusEl.textContent = gestureLabel[gesture] || 'พบมือ';
+
+    // suck target
+    const suckTarget = gesture === 'fist' ? 1 : 0;
+    suckT += (suckTarget - suckT) * Math.min(0.06 + Math.abs(suckTarget-suckT)*0.06, 0.2);
+
+    // heart target
+    const heartTarget = gesture === 'ily' ? 1 : 0;
+    heartT += (heartTarget - heartT) * Math.min(0.06 + Math.abs(heartTarget-heartT)*0.06, 0.2);
+
+    // zoom / fling based on hand size change
+    const size = handBoundingSize(landmarks);
+    const now = performance.now();
+    if(handSizeSmoothed === null) handSizeSmoothed = size;
+    handSizeSmoothed += (size - handSizeSmoothed)*0.35;
+
+    if(lastHandSize !== null){
+      const deltaT = Math.max((now-lastHandTime)/1000, 0.001);
+      const rate = (handSizeSmoothed - lastHandSize)/deltaT;
+
+      // rapid shrink => fling / snap back
+      if(rate < -1.1 && !flingActive){
+        flingActive = true;
+        flingAnim = 0;
+      }
+      if(!flingActive){
+        // map hand size (~0.15 far .. ~0.55 close) to zoom distance
+        const clamped = Math.max(0.12, Math.min(0.6, handSizeSmoothed));
+        const norm = (clamped - 0.12)/(0.6-0.12); // 0..1
+        zoomTargetDist = cameraDefaultDist - norm*140; // closer hand => smaller distance => zoom in
+      }
+    }
+    lastHandSize = handSizeSmoothed;
+    lastHandTime = now;
+
+  } else {
+    statusEl.textContent = 'ไม่พบมือ';
+    currentGesture = 'none';
+    suckT += (0 - suckT)*0.08;
+    heartT += (0 - heartT)*0.08;
+    lastHandSize = null;
+    handSizeSmoothed = null;
+  }
+  octx.restore();
+}
+
+const hands = new Hands({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6
+});
+hands.onResults(onResults);
+
+document.getElementById('startBtn').addEventListener('click', async ()=>{
+  document.getElementById('startBtn').style.display = 'none';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    overlay.width = 180; overlay.height = 135;
+
+    const camUtil = new Camera(videoEl, {
+      onFrame: async ()=>{ await hands.send({image:videoEl}); },
+      width:320, height:240
+    });
+    camUtil.start();
+  }catch(err){
+    statusEl.textContent = 'ไม่สามารถเข้าถึงกล้องได้';
+    console.error(err);
+  }
+});
+</script>
+</body>
+</html>
